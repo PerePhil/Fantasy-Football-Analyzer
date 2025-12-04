@@ -41,6 +41,10 @@ For private leagues, you'll need your ESPN authentication cookies:
 - Uses ESPN's unofficial API (may change without notice)
 - For leagues with >20 remaining games, simulation may take significant time (2^20 = 1M+ scenarios)
 - Assumes equal probability for all game outcomes (50/50 win probability)
+- This does not currently use much optimization. Optimizations that can be made include:
+  - Paralell processing of games
+  - Automatic elimination of games that don't affect playoff conditions
+  - Optimizations to object copying and don't clone full teams each sim.
 
 ## Acknowledgments
 
