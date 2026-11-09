@@ -1,680 +1,280 @@
 package org.example;
 
+import org.example.ScenarioEngine.Fate;
+import org.example.ScenarioEngine.Result;
+import org.example.ScenarioEngine.Status;
 import org.example.models.League;
+import org.example.models.Matchup;
 import org.example.models.Team;
+import org.example.utils.BooleanMinimizer;
+import org.example.utils.BooleanMinimizer.Term;
 
 import java.util.*;
 
 /**
- * Analyzes clinch scenarios and magic numbers for playoff qualification.
+ * Turns the full search into clinch and elimination scenarios.
+ * Every statement here is exact over the remaining win/loss outcomes.
  */
 public class ClinchAnalyzer {
+    private static final String RULE = "=".repeat(78);
+    private static final String LINE = "-".repeat(78);
+
     private final League league;
-    private final SimulationEngine simulator;
-    private final Map<Integer, Double> playoffOdds;
+    private final ScenarioEngine engine;
+    private final Result result;
 
-    public ClinchAnalyzer(League league, SimulationEngine simulator) {
+    public ClinchAnalyzer(League league, ScenarioEngine engine) {
         this.league = league;
-        this.simulator = simulator;
-        this.playoffOdds = simulator.getAllPlayoffOdds();
+        this.engine = engine;
+        this.result = engine.run();
     }
 
-    /**
-     * Get the status description for a team.
-     */
-    public String getTeamStatus(int teamId) {
-        double odds = playoffOdds.get(teamId);
+    public Status getStatus(int teamId) {
+        return result.status(teamId);
+    }
 
-        if (odds >= 1.0) {
-            // Check if truly clinched (playoffs guaranteed regardless of points)
-            if (hasTrueClinch(teamId)) {
+    /** Short status label for the standings table. */
+    public String getStatusLabel(int teamId) {
+        Fate fate = result.fate(teamId);
+        switch (fate) {
+            case CLINCHED:
                 return "CLINCHED";
-            } else {
-                return "Likely In";
-            }
-        } else if (odds == 0.0) {
-            // Check if truly eliminated (can't make playoffs regardless of points)
-            if (hasTrueElimination(teamId)) {
+            case ELIMINATED:
                 return "ELIMINATED";
-            } else {
-                return "Likely Out";
-            }
-        } else if (odds >= 0.95) {
-            return "Magic #: 1";
-        } else if (odds >= 0.75) {
-            return "Strong position";
-        } else if (odds >= 0.5) {
-            return "In the hunt";
-        } else if (odds >= 0.25) {
-            return "Need help";
-        } else {
-            return "Long shot";
+            case IN_UNLESS_POINTS:
+                return "Alive - can only miss on points";
+            case OUT_UNLESS_POINTS:
+                return "Alive - needs points tiebreaker";
+            case POINTS_DECIDE:
+                return "Alive - decided by points";
+            default:
+                break;
         }
-    }
-
-    /**
-     * Check if a team has truly clinched - makes playoffs in all scenarios
-     * even with worst possible points tiebreakers.
-     */
-    private boolean hasTrueClinch(int teamId) {
-        // If no remaining games, 100% odds = clinched
-        if (league.getRemainingMatchups().isEmpty()) {
-            return true;
-        }
-
-        // A team has truly clinched if their WORST possible wins
-        // is strictly greater than the (playoff_spots + 1)th best possible wins
         Team team = league.getTeam(teamId);
-        int worstWins = team.getWins(); // lose all remaining games
-        int playoffSpots = league.getNumberOfPlayoffTeams();
-
-        // Get best possible wins for all other teams, sorted descending
-        List<Integer> otherBestWins = new ArrayList<>();
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            // Best possible wins = current wins + all remaining games
-            int bestWins = other.getWins() + other.getRemainingOpponents().size();
-            otherBestWins.add(bestWins);
+        if (team.getRemainingOpponents().isEmpty()) {
+            return "Alive - needs help";
         }
-
-        // Sort descending
-        otherBestWins.sort(Collections.reverseOrder());
-
-        // If there are at least (playoffSpots) teams, check the team at position
-        // (playoffSpots - 1)
-        // This is the cutoff - teams at this position or better would make playoffs
-        // We clinch if our worst wins is STRICTLY BETTER than the team at position
-        // playoffSpots
-        // (the first team OUT of playoffs in best case scenario)
-        if (otherBestWins.size() >= playoffSpots) {
-            int firstTeamOutBestWins = otherBestWins.get(playoffSpots - 1);
-            // We clinch only if we're guaranteed to have MORE wins than the cutoff
-            return worstWins > firstTeamOutBestWins;
-        } else {
-            // Fewer teams than playoff spots - everyone makes it
-            return true;
+        switch (result.winOut(teamId)) {
+            case CLINCHED:
+                return "Alive - controls own destiny";
+            case IN_UNLESS_POINTS:
+                return "Alive - win out + points";
+            default:
+                return "Alive - needs help";
         }
     }
 
-    /**
-     * Check if a team is truly eliminated - can't make playoffs even with
-     * best possible points tiebreakers.
-     */
-    private boolean hasTrueElimination(int teamId) {
-        // If no remaining games, 0% odds = eliminated
-        if (league.getRemainingMatchups().isEmpty()) {
-            return true;
-        }
+    /** Teams ordered by status, then win %, then points for. */
+    public List<Team> getSortedTeams() {
+        List<Team> teams = new ArrayList<>(league.getTeams().values());
+        teams.sort(Comparator
+                .comparingInt((Team t) -> statusRank(result.status(t.getTeamId())))
+                .thenComparing(Comparator.comparingDouble(Team::getWinPercentage).reversed())
+                .thenComparing(Comparator.comparingDouble(Team::getPointsFor).reversed()));
+        return teams;
+    }
 
-        // A team is eliminated if their BEST possible wins
-        // is strictly less than the (playoff_spots)th worst possible wins
-        Team team = league.getTeam(teamId);
-        int bestWins = team.getWins() + team.getRemainingOpponents().size(); // win all
-        int playoffSpots = league.getNumberOfPlayoffTeams();
-
-        // Get worst possible wins for all other teams, sorted descending
-        List<Integer> otherWorstWins = new ArrayList<>();
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            // Worst possible wins = current wins (lose all remaining)
-            int worstWins = other.getWins();
-            otherWorstWins.add(worstWins);
-        }
-
-        // Sort descending
-        otherWorstWins.sort(Collections.reverseOrder());
-
-        // If there are at least playoffSpots teams, check the team at position
-        // (playoffSpots - 1)
-        // This is the last team IN playoffs in worst case scenario
-        // We're eliminated if our best wins is STRICTLY LESS than this cutoff
-        if (otherWorstWins.size() >= playoffSpots) {
-            int lastTeamInWorstWins = otherWorstWins.get(playoffSpots - 1);
-            // We're eliminated only if we can't match the wins of the playoff cutoff
-            return bestWins < lastTeamInWorstWins;
-        } else {
-            // Fewer teams than playoff spots - everyone makes it
-            return false;
+    private static int statusRank(Status s) {
+        switch (s) {
+            case CLINCHED:
+                return 0;
+            case ALIVE:
+                return 1;
+            default:
+                return 2;
         }
     }
 
-    /**
-     * Get a detailed analysis for a specific team.
-     */
-    public String getDetailedAnalysis(int teamId) {
-        Team team = league.getTeam(teamId);
-        double odds = playoffOdds.get(teamId);
-
-        StringBuilder sb = new StringBuilder();
-        sb.append(String.format("\n=== %s ===\n", team.getTeamName()));
-        sb.append(String.format("Record: %s\n", team.getRecord()));
-        sb.append(String.format("Points For: %.2f | Points Against: %.2f\n",
-                team.getPointsFor(), team.getPointsAgainst()));
-        sb.append(String.format("Playoff Odds: %.1f%%\n", odds * 100));
-        sb.append(String.format("Status: %s\n", getTeamStatus(teamId)));
-
-        int remainingGames = team.getRemainingOpponents().size();
-        sb.append(String.format("Remaining Games: %d\n", remainingGames));
-
-        // Add scenario analysis
-        if (odds > 0 && odds < 1.0) {
-            sb.append(String.format("\nMakes playoffs in %,d of %,d scenarios\n",
-                    simulator.getPlayoffCount(teamId),
-                    simulator.getTotalScenarios()));
-        }
-
-        return sb.toString();
-    }
-
-    /**
-     * Get outcomes sorted by playoff odds.
-     */
-    public List<Map.Entry<Integer, Double>> getSortedOdds() {
-        List<Map.Entry<Integer, Double>> sorted = new ArrayList<>(playoffOdds.entrySet());
-        sorted.sort((a, b) -> Double.compare(b.getValue(), a.getValue())); // Descending
-        return sorted;
-    }
-
-    /**
-     * Generate a summary report of all teams.
-     */
     public String generateSummaryReport() {
         StringBuilder sb = new StringBuilder();
+        sb.append('\n').append(RULE).append('\n');
+        sb.append("PLAYOFF CLINCH REPORT\n");
+        sb.append(RULE).append('\n');
+        sb.append(league).append('\n');
+        sb.append("Tiebreakers: win % -> head-to-head among tied teams -> total points for\n");
+        sb.append(RULE).append("\n\n");
 
-        sb.append("\n");
-        sb.append("=".repeat(70)).append("\n");
-        sb.append("FANTASY FOOTBALL PLAYOFF CONDITIONS\n");
-        sb.append("=".repeat(70)).append("\n");
-        sb.append(league.toString()).append("\n");
-        sb.append("=".repeat(70)).append("\n\n");
-
-        // Header
-        sb.append(String.format("%-30s %8s %30s\n",
-                "Team", "Record", "Status"));
-        sb.append("-".repeat(70)).append("\n");
-
-        // Sort teams by playoff odds (just for ordering)
-        List<Map.Entry<Integer, Double>> sortedOdds = getSortedOdds();
-
-        for (Map.Entry<Integer, Double> entry : sortedOdds) {
-            int teamId = entry.getKey();
-            Team team = league.getTeam(teamId);
-            String status = getTeamStatus(teamId);
-
-            sb.append(String.format("%-30s %8s %30s\n",
-                    truncate(team.getTeamName(), 30),
-                    team.getRecord(),
-                    status));
+        sb.append(String.format("%-30s %8s %9s  %s%n", "Team", "Record", "PF", "Status"));
+        sb.append(LINE).append('\n');
+        for (Team t : getSortedTeams()) {
+            sb.append(String.format("%-30s %8s %9.2f  %s%n",
+                    truncate(t.getTeamName(), 30), t.getRecord(), t.getPointsFor(),
+                    getStatusLabel(t.getTeamId())));
         }
-
-        sb.append("-".repeat(70)).append("\n");
-        sb.append(String.format("\nWin/loss scenarios analyzed: %,d\n",
-                simulator.getTotalScenarios()));
-        sb.append(String.format("Remaining games: %d\n",
-                league.getRemainingMatchups().size()));
-        sb.append("Note: Points tiebreakers shown as conditions below.\n");
-
+        sb.append(LINE).append('\n');
+        sb.append(String.format("Remaining games: %d | Win/loss outcomes checked: %,d%n",
+                engine.getGames().size(), engine.getTotalOutcomes()));
+        sb.append("CLINCHED / ELIMINATED hold for every outcome, however points go.\n");
         return sb.toString();
     }
 
-    /**
-     * Truncate string to max length.
-     */
-    private String truncate(String str, int maxLength) {
-        if (str.length() <= maxLength) {
-            return str;
-        }
-        return str.substring(0, maxLength - 3) + "...";
-    }
-
-    /**
-     * Generate clinch scenarios report for teams not clinched or eliminated.
-     */
     public String generateClinchScenariosReport() {
         StringBuilder sb = new StringBuilder();
-
-        sb.append("\n");
-        sb.append("=".repeat(70)).append("\n");
+        sb.append('\n').append(RULE).append('\n');
         sb.append("CLINCH SCENARIOS\n");
-        sb.append("=".repeat(70)).append("\n\n");
+        sb.append(RULE).append("\n\n");
 
-        List<Map.Entry<Integer, Double>> sortedOdds = getSortedOdds();
-        boolean anyShown = false;
-
-        for (Map.Entry<Integer, Double> entry : sortedOdds) {
-            int teamId = entry.getKey();
-            double odds = entry.getValue();
-            Team team = league.getTeam(teamId);
-            String status = getTeamStatus(teamId);
-
-            // Show "Likely In" teams (100% but not clinched)
-            if (status.equals("Likely In")) {
-                anyShown = true;
-                sb.append(String.format("### %s (%s) - %s ###\n",
-                        team.getTeamName(), team.getRecord(), status));
-                sb.append("Makes playoffs in all win/loss scenarios.\n");
-                sb.append("Could miss only if points tiebreaker goes against them.\n\n");
-
-                // Show nightmare scenario
-                sb.append("Nightmare scenario to miss playoffs:\n");
-                sb.append(generateNightmareScenario(teamId));
-                sb.append("\n");
-
-                // Analyze potential tiebreaker scenarios
-                String tiebreakerDetails = analyzeTiebreakerRisks(teamId);
-                sb.append(tiebreakerDetails);
-                sb.append("\n");
-            }
-            // Show "Likely Out" teams (0% but not eliminated)
-            else if (status.equals("Likely Out")) {
-                anyShown = true;
-                sb.append(String.format("### %s (%s) - %s ###\n",
-                        team.getTeamName(), team.getRecord(), status));
-                sb.append("Misses playoffs in all win/loss scenarios.\n");
-                sb.append("Could make it only if points tiebreaker goes in their favor.\n\n");
-
-                // Show miracle scenario
-                sb.append("Miracle scenario to make playoffs:\n");
-                sb.append(generateMiracleScenario(teamId));
-                sb.append("\n");
-            }
-            // Show teams in contention (not clinched, not eliminated, not 100%/0%)
-            else if (odds > 0.0 && odds < 1.0) {
-                anyShown = true;
-                sb.append(String.format("### %s (%s) - In Contention ###\n",
-                        team.getTeamName(), team.getRecord()));
-
-                // Show playoff conditions
-                sb.append("Playoff conditions:\n");
-                sb.append(generatePlayoffConditions(teamId));
-                sb.append("\n");
+        boolean any = false;
+        for (Team t : getSortedTeams()) {
+            if (result.status(t.getTeamId()) == Status.ALIVE) {
+                any = true;
+                sb.append(getTeamScenarios(t.getTeamId())).append('\n');
             }
         }
-
-        if (!anyShown) {
-            sb.append("No scenarios to display.\n");
-            sb.append("All teams have either clinched or been eliminated.\n");
+        if (!any) {
+            sb.append("Every team has clinched or been eliminated.\n");
         }
-
         return sb.toString();
     }
 
-    /**
-     * Generate playoff conditions for a team in contention.
-     * Shows exactly what needs to happen for them to make playoffs.
-     */
-    private String generatePlayoffConditions(int teamId) {
-        StringBuilder sb = new StringBuilder();
+    /** Full scenario breakdown for one team. */
+    public String getTeamScenarios(int teamId) {
         Team team = league.getTeam(teamId);
-        List<org.example.models.Matchup> remainingGames = simulator.getRemainingGames();
-        List<int[]> playoffScenarios = simulator.getPlayoffScenarios(teamId);
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("### %s (%s, %.2f PF) - %s%n",
+                team.getTeamName(), team.getRecord(), team.getPointsFor(), getStatusLabel(teamId)));
 
-        if (playoffScenarios.isEmpty()) {
-            sb.append("  Cannot make playoffs in any win/loss scenario.\n");
-            sb.append("  Would need to tie on record AND win points tiebreaker.\n");
-            return sb.toString();
+        Fate fate = result.fate(teamId);
+        if (fate == Fate.IN_UNLESS_POINTS) {
+            sb.append("  Makes the playoffs in every outcome unless a total-points tiebreaker goes against them.\n");
+        } else if (fate == Fate.OUT_UNLESS_POINTS) {
+            sb.append("  Misses the playoffs in every outcome unless they win a total-points tiebreaker.\n");
+        } else if (fate == Fate.POINTS_DECIDE) {
+            sb.append("  Every outcome comes down to a total-points tiebreaker.\n");
         }
 
-        // Find required outcomes (games where same team wins in ALL playoff scenarios)
-        Map<Integer, Boolean> requiredResults = new LinkedHashMap<>(); // gameIndex -> true=home wins, false=away wins
-
-        for (int gameIdx = 0; gameIdx < remainingGames.size(); gameIdx++) {
-            Boolean requiredResult = null;
-            boolean consistent = true;
-
-            for (int[] scenario : playoffScenarios) {
-                boolean homeWins = scenario[gameIdx] == 0;
-                if (requiredResult == null) {
-                    requiredResult = homeWins;
-                } else if (requiredResult != homeWins) {
-                    consistent = false;
-                    break;
-                }
-            }
-
-            if (consistent && requiredResult != null) {
-                requiredResults.put(gameIdx, requiredResult);
-            }
+        if (!team.getRemainingOpponents().isEmpty()) {
+            sb.append(String.format("  Win out:  %s%n", describe(result.winOut(teamId))));
+            sb.append(String.format("  Lose out: %s%n", describe(result.loseOut(teamId))));
         }
 
-        // Show required outcomes
-        if (requiredResults.isEmpty()) {
-            sb.append("  Makes playoffs in SOME scenarios, not in others.\n");
-            sb.append("  Outcome depends on combination of game results.\n\n");
-        } else {
-            sb.append("  Required game results:\n");
-            for (Map.Entry<Integer, Boolean> entry : requiredResults.entrySet()) {
-                int gameIdx = entry.getKey();
-                boolean homeWins = entry.getValue();
-                org.example.models.Matchup game = remainingGames.get(gameIdx);
-
-                String winner = homeWins
-                        ? league.getTeam(game.getHomeTeamId()).getTeamName()
-                        : league.getTeam(game.getAwayTeamId()).getTeamName();
-                String loser = homeWins
-                        ? league.getTeam(game.getAwayTeamId()).getTeamName()
-                        : league.getTeam(game.getHomeTeamId()).getTeamName();
-
-                sb.append(String.format("    - %s beats %s\n", winner, loser));
-            }
-            sb.append("\n");
-        }
-
-        // Show potential tiebreaker conditions
-        int bestWins = team.getWins() + team.getRemainingOpponents().size();
-
-        sb.append("  Potential tiebreaker scenarios (if tied on record):\n");
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            String otherStatus = getTeamStatus(other.getTeamId());
-            if (otherStatus.equals("CLINCHED") || otherStatus.equals("ELIMINATED")) {
-                continue;
-            }
-
-            // Could they finish with same record?
-            int otherMinWins = other.getWins();
-            int otherMaxWins = other.getWins() + other.getRemainingOpponents().size();
-
-            if (bestWins >= otherMinWins && bestWins <= otherMaxWins) {
-                int h2hWins = team.getHeadToHeadWins(other.getTeamId());
-                int h2hLosses = team.getHeadToHeadLosses(other.getTeamId());
-                boolean playAgain = team.getRemainingOpponents().contains(other.getTeamId());
-
-                if (playAgain) {
-                    // H2H could change this week
-                    sb.append(String.format("    vs %s: If same record, winner of this week's game wins tiebreaker\n",
-                            other.getTeamName()));
-                } else if (h2hWins > h2hLosses) {
-                    sb.append(String.format("    vs %s: Wins H2H tiebreaker (%d-%d) ✓\n",
-                            other.getTeamName(), h2hWins, h2hLosses));
-                } else if (h2hLosses > h2hWins) {
-                    sb.append(String.format("    vs %s: Loses H2H tiebreaker (%d-%d) ✗\n",
-                            other.getTeamName(), h2hWins, h2hLosses));
-                } else {
-                    // H2H tied, show points condition
-                    double pointsDiff = team.getPointsFor() - other.getPointsFor();
-                    if (pointsDiff > 0) {
-                        sb.append(String.format("    vs %s: Must not be outscored by more than %.1f pts\n",
-                                other.getTeamName(), pointsDiff));
-                    } else {
-                        sb.append(String.format("    vs %s: Must outscore by %.1f+ pts\n",
-                                other.getTeamName(), Math.abs(pointsDiff) + 0.1));
-                    }
-                }
-            }
-        }
-
+        appendWeekScenarios(sb, teamId);
+        appendMustHaves(sb, teamId);
+        appendPointsRivals(sb, team);
         return sb.toString();
     }
 
-    /**
-     * Generate nightmare scenario for a "Likely In" team showing how they could
-     * miss playoffs.
-     */
-    private String generateNightmareScenario(int teamId) {
+    private void appendWeekScenarios(StringBuilder sb, int teamId) {
+        int k = engine.getWeekGameCount();
+        if (k == 0) {
+            return;
+        }
+        boolean finalWeek = engine.getGames().size() == k;
+        Map<Fate, List<Integer>> byFate = new EnumMap<>(Fate.class);
+        for (int o = 0; o < (1 << k); o++) {
+            byFate.computeIfAbsent(result.fateAfterWeek(teamId, o), f -> new ArrayList<>()).add(o);
+        }
+
+        sb.append(String.format("  Week %d%s:%n", engine.getNextWeek(), finalWeek ? " (final week)" : ""));
+        appendCondition(sb, "Clinches if", byFate.get(Fate.CLINCHED), k);
+        appendCondition(sb, "Eliminated if", byFate.get(Fate.ELIMINATED), k);
+        appendCondition(sb, "In unless they lose a points tiebreaker if", byFate.get(Fate.IN_UNLESS_POINTS), k);
+        appendCondition(sb, "Out unless they win a points tiebreaker if", byFate.get(Fate.OUT_UNLESS_POINTS), k);
+        appendCondition(sb, "Decided by a points tiebreaker if", byFate.get(Fate.POINTS_DECIDE), k);
+        if (!byFate.containsKey(Fate.CLINCHED) && !byFate.containsKey(Fate.ELIMINATED)
+                && !byFate.containsKey(Fate.IN_UNLESS_POINTS) && !byFate.containsKey(Fate.OUT_UNLESS_POINTS)
+                && !byFate.containsKey(Fate.POINTS_DECIDE)) {
+            sb.append("    Can't clinch or be eliminated this week.\n");
+        }
+    }
+
+    private void appendCondition(StringBuilder sb, String label, List<Integer> outcomes, int k) {
+        if (outcomes == null || outcomes.isEmpty()) {
+            return;
+        }
+        sb.append("    ").append(label).append(":\n");
+        List<Term> terms = BooleanMinimizer.minimize(k, outcomes);
+        boolean first = true;
+        for (Term term : terms) {
+            sb.append(first ? "      - " : "      - OR ").append(describe(term)).append('\n');
+            first = false;
+        }
+    }
+
+    private void appendMustHaves(StringBuilder sb, int teamId) {
+        Map<Integer, Boolean> must = result.mustHaveResults(teamId);
+        if (must.isEmpty()) {
+            return;
+        }
+        sb.append("  Must happen to stay alive:\n");
+        for (Map.Entry<Integer, Boolean> e : must.entrySet()) {
+            Matchup m = engine.getGames().get(e.getKey());
+            sb.append(String.format("    - Week %d: %s%n", m.getWeek(), describe(m, e.getValue())));
+        }
+    }
+
+    private void appendPointsRivals(StringBuilder sb, Team team) {
+        List<Integer> rivals = result.pointsRivals(team.getTeamId());
+        if (rivals.isEmpty()) {
+            return;
+        }
+        sb.append("  Can end up in a total-points tiebreaker with:\n");
+        for (int id : rivals) {
+            Team other = league.getTeam(id);
+            double diff = team.getPointsFor() - other.getPointsFor();
+            String gap = diff >= 0
+                    ? String.format("%s leads by %.2f", team.getTeamName(), diff)
+                    : String.format("%s leads by %.2f", other.getTeamName(), -diff);
+            sb.append(String.format("    - %s (%s)%n", other.getTeamName(), gap));
+        }
+    }
+
+    private String describe(Term term) {
+        if (term.care() == 0) {
+            return "any results";
+        }
+        List<String> parts = new ArrayList<>();
+        for (int g = 0; g < engine.getWeekGameCount(); g++) {
+            if ((term.care() >> g & 1) != 0) {
+                boolean homeWins = (term.value() >> g & 1) == 0;
+                parts.add(describe(engine.getGames().get(g), homeWins));
+            }
+        }
+        return String.join(" AND ", parts);
+    }
+
+    private String describe(Matchup m, boolean homeWins) {
+        Team winner = league.getTeam(homeWins ? m.getHomeTeamId() : m.getAwayTeamId());
+        Team loser = league.getTeam(homeWins ? m.getAwayTeamId() : m.getHomeTeamId());
+        return winner.getTeamName() + " beats " + loser.getTeamName();
+    }
+
+    private static String describe(Fate fate) {
+        switch (fate) {
+            case CLINCHED:
+                return "clinches";
+            case IN_UNLESS_POINTS:
+                return "in unless they lose a points tiebreaker";
+            case OUT_UNLESS_POINTS:
+                return "out unless they win a points tiebreaker";
+            case POINTS_DECIDE:
+                return "decided by a points tiebreaker";
+            case ELIMINATED:
+                return "eliminated";
+            case UNDECIDED:
+                return "depends on other results";
+            default:
+                return "n/a";
+        }
+    }
+
+    /** Remaining schedule, for verbose output. */
+    public String getRemainingSchedule() {
         StringBuilder sb = new StringBuilder();
-        Team team = league.getTeam(teamId);
-
-        // Worst case record for this team
-        int worstWins = team.getWins(); // lose all remaining
-        int worstLosses = team.getLosses() + team.getRemainingOpponents().size();
-
-        // Find teams that could tie or beat this record
-        List<Team> threats = new ArrayList<>();
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            String otherStatus = getTeamStatus(other.getTeamId());
-            if (otherStatus.equals("CLINCHED") || otherStatus.equals("ELIMINATED")) {
-                continue;
+        int week = -1;
+        for (Matchup m : engine.getGames()) {
+            if (m.getWeek() != week) {
+                week = m.getWeek();
+                sb.append(String.format("Week %d%n", week));
             }
-
-            // Best possible record for other team
-            int otherBestWins = other.getWins() + other.getRemainingOpponents().size();
-
-            // Could they finish with same or better record?
-            if (otherBestWins >= worstWins) {
-                threats.add(other);
-            }
+            sb.append(String.format("  %s vs %s%n",
+                    league.getTeam(m.getHomeTeamId()).getTeamName(),
+                    league.getTeam(m.getAwayTeamId()).getTeamName()));
         }
-
-        // Sort threats by current record (descending)
-        threats.sort((a, b) -> Integer.compare(b.getWins(), a.getWins()));
-
-        sb.append(String.format("  1. Finish %d-%d (lose all remaining games)\n", worstWins, worstLosses));
-
-        // Filter threats to only show teams that need to DO something (win games) to
-        // threaten
-        List<Team> activeThreats = new ArrayList<>();
-        for (Team threat : threats) {
-            // Only include if they're not already at or above the threshold
-            if (threat.getWins() < worstWins) {
-                activeThreats.add(threat);
-            }
-        }
-
-        if (activeThreats.isEmpty()) {
-            sb.append("  2. Other teams already at same or better record - tiebreakers determine outcome\n");
-        } else {
-            sb.append(String.format("  2. These teams need to win games to catch up:\n"));
-            for (Team threat : activeThreats) {
-                int winsNeeded = worstWins - threat.getWins();
-                sb.append(String.format("     - %s (needs to win %d of remaining games)\n",
-                        threat.getTeamName(), winsNeeded));
-            }
-        }
-
-        // Separate tiebreakers into already lost vs need to lose
-        List<String> alreadyLost = new ArrayList<>();
-        List<String> needToLose = new ArrayList<>();
-
-        for (Team threat : threats) {
-            int h2hWins = team.getHeadToHeadWins(threat.getTeamId());
-            int h2hLosses = team.getHeadToHeadLosses(threat.getTeamId());
-            boolean playAgain = team.getRemainingOpponents().contains(threat.getTeamId());
-
-            if (h2hLosses > h2hWins && !playAgain) {
-                // Already locked in - can't change
-                alreadyLost.add(String.format("     - Loses H2H to %s (%d-%d)",
-                        threat.getTeamName(), h2hWins, h2hLosses));
-            } else if (h2hWins == h2hLosses && !playAgain) {
-                double pointsDiff = team.getPointsFor() - threat.getPointsFor();
-                if (pointsDiff < 0) {
-                    // Already behind - locked in
-                    alreadyLost.add(String.format("     - Behind %s by %.1f pts",
-                            threat.getTeamName(), Math.abs(pointsDiff)));
-                } else {
-                    // Need to be outscored - can change
-                    needToLose.add(String.format("     - Get outscored by %s by %.1f+ pts",
-                            threat.getTeamName(), pointsDiff + 0.1));
-                }
-            } else if (playAgain) {
-                // H2H could change this week
-                needToLose.add(String.format("     - Lose to %s this week AND lose pts tiebreaker",
-                        threat.getTeamName()));
-            }
-        }
-
-        // Only show tiebreakers that can still change
-        if (!needToLose.isEmpty()) {
-            sb.append("  3. AND these tiebreakers must go against them:\n");
-            for (String item : needToLose) {
-                sb.append(item).append("\n");
-            }
-        }
-
         return sb.toString();
     }
 
-    /**
-     * Generate miracle scenario for a "Likely Out" team showing how they could make
-     * playoffs.
-     */
-    private String generateMiracleScenario(int teamId) {
-        StringBuilder sb = new StringBuilder();
-        Team team = league.getTeam(teamId);
-
-        // Best case record for this team
-        int bestWins = team.getWins() + team.getRemainingOpponents().size(); // win all
-        int bestLosses = team.getLosses();
-
-        // Find teams that could tie or fall below this record
-        List<Team> targets = new ArrayList<>();
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            String otherStatus = getTeamStatus(other.getTeamId());
-            if (otherStatus.equals("CLINCHED") || otherStatus.equals("ELIMINATED")) {
-                continue;
-            }
-
-            // Worst possible record for other team
-            int otherWorstWins = other.getWins();
-
-            // Could they finish with same or worse record?
-            if (otherWorstWins <= bestWins) {
-                targets.add(other);
-            }
-        }
-
-        // Sort targets by current record (ascending - worst teams first)
-        targets.sort((a, b) -> Integer.compare(a.getWins(), b.getWins()));
-
-        sb.append(String.format("  1. Win all remaining games to finish %d-%d\n", bestWins, bestLosses));
-
-        // Filter targets to only show teams that need to lose games
-        List<Team> activeTargets = new ArrayList<>();
-        for (Team target : targets) {
-            if (target.getWins() > bestWins) {
-                activeTargets.add(target);
-            }
-        }
-
-        if (activeTargets.isEmpty()) {
-            sb.append("  2. Already tied with other bubble teams on record\n");
-        } else {
-            sb.append("  2. These teams need to lose games:\n");
-            for (Team target : activeTargets) {
-                int lossesNeeded = target.getWins() - bestWins;
-                sb.append(String.format("     - %s (needs to lose %d of remaining games)\n",
-                        target.getTeamName(), lossesNeeded));
-            }
-        }
-
-        // Show specific tiebreaker requirements
-        sb.append("  3. AND win these specific tiebreakers:\n");
-        for (Team target : targets) {
-            int h2hWins = team.getHeadToHeadWins(target.getTeamId());
-            int h2hLosses = team.getHeadToHeadLosses(target.getTeamId());
-            boolean playAgain = team.getRemainingOpponents().contains(target.getTeamId());
-
-            if (h2hWins > h2hLosses && !playAgain) {
-                sb.append(String.format("     - Already wins H2H vs %s (%d-%d) ✓\n",
-                        target.getTeamName(), h2hWins, h2hLosses));
-            } else if (h2hWins == h2hLosses && !playAgain) {
-                double pointsDiff = team.getPointsFor() - target.getPointsFor();
-                if (pointsDiff > 0) {
-                    sb.append(String.format("     - Already ahead of %s by %.1f points ✓\n",
-                            target.getTeamName(), pointsDiff));
-                } else {
-                    sb.append(String.format("     - Outscore %s by %.1f+ points\n",
-                            target.getTeamName(), Math.abs(pointsDiff) + 0.1));
-                }
-            } else if (playAgain) {
-                sb.append(String.format("     - Beat %s this week AND win points tiebreaker\n",
-                        target.getTeamName()));
-            }
-        }
-
-        return sb.toString();
-    }
-
-    /**
-     * Analyze tiebreaker risks for a "Likely In" team.
-     */
-    private String analyzeTiebreakerRisks(int teamId) {
-        StringBuilder sb = new StringBuilder();
-        Team team = league.getTeam(teamId);
-
-        // Find teams that could potentially tie with this team on record
-        List<Team> riskyTiebreakers = new ArrayList<>();
-        for (Team other : league.getTeams().values()) {
-            if (other.getTeamId() == teamId)
-                continue;
-
-            // Skip teams that are clinched or eliminated - they're not competing for same
-            // spots
-            String otherStatus = getTeamStatus(other.getTeamId());
-            if (otherStatus.equals("CLINCHED") || otherStatus.equals("ELIMINATED")) {
-                continue;
-            }
-
-            // Check if this team could end up with the same record
-            int thisTeamMinWins = team.getWins();
-            int thisTeamMaxWins = team.getWins() + team.getRemainingOpponents().size();
-            int otherMinWins = other.getWins();
-            int otherMaxWins = other.getWins() + other.getRemainingOpponents().size();
-
-            // If win ranges overlap, they could tie
-            if (!(thisTeamMaxWins < otherMinWins || otherMaxWins < thisTeamMinWins)) {
-                // Check H2H tiebreaker
-                int h2hWins = team.getHeadToHeadWins(other.getTeamId());
-                int h2hLosses = team.getHeadToHeadLosses(other.getTeamId());
-
-                // Check if they play each other in remaining games
-                boolean playAgain = team.getRemainingOpponents().contains(other.getTeamId());
-
-                // Only include if this is a risky tiebreaker scenario:
-                // 1. Team loses H2H (and they don't play again, so it's locked in)
-                // 2. Teams are tied in H2H (goes to points or they play again)
-                if ((h2hLosses > h2hWins && !playAgain) || h2hWins == h2hLosses) {
-                    riskyTiebreakers.add(other);
-                }
-                // Skip if team wins H2H and they don't play again - team always wins this
-                // tiebreaker
-            }
-        }
-
-        if (riskyTiebreakers.isEmpty()) {
-            sb.append("No risky tiebreaker scenarios - wins all potential head-to-head tiebreakers.\n");
-            return sb.toString();
-        }
-
-        sb.append("Risky tiebreaker scenarios:\n");
-        for (Team other : riskyTiebreakers) {
-            int h2hWins = team.getHeadToHeadWins(other.getTeamId());
-            int h2hLosses = team.getHeadToHeadLosses(other.getTeamId());
-            double pointsDiff = team.getPointsFor() - other.getPointsFor();
-            boolean playAgain = team.getRemainingOpponents().contains(other.getTeamId());
-
-            sb.append(String.format("  vs %s:\n", other.getTeamName()));
-            sb.append(String.format("    H2H: %d-%d", h2hWins, h2hLosses));
-            if (playAgain) {
-                sb.append(" (play again this week - outcome TBD)\n");
-            } else if (h2hWins > h2hLosses) {
-                sb.append(" (wins H2H tiebreaker)\n");
-            } else if (h2hLosses > h2hWins) {
-                sb.append(" (loses H2H tiebreaker) ⚠️\n");
-            } else {
-                // Tied on H2H, show what needs to happen with points
-                if (pointsDiff > 0) {
-                    // Currently ahead - show how much they can afford to be outscored
-                    sb.append(String.format(" - Can be outscored by up to %.1f points\n", pointsDiff));
-                } else {
-                    // Currently behind - show how much they need to outscore by
-                    sb.append(String.format(" - Must outscore by %.1f points ⚠️\n", Math.abs(pointsDiff) + 0.1));
-                }
-            }
-        }
-
-        return sb.toString();
+    private static String truncate(String str, int maxLength) {
+        return str.length() <= maxLength ? str : str.substring(0, maxLength - 3) + "...";
     }
 }

@@ -7,7 +7,7 @@ import picocli.CommandLine.Option;
 
 import java.util.concurrent.Callable;
 
-@Command(name = "fantasy-playoff-odds", mixinStandardHelpOptions = true, version = "1.0", description = "Fantasy Football Playoff Odds Simulator")
+@Command(name = "fantasy-clinch-scenarios", mixinStandardHelpOptions = true, version = "1.0", description = "Fantasy Football Playoff Clinch Scenarios")
 public class Main implements Callable<Integer> {
 
     @Option(names = { "-c", "--config" }, description = "Path to configuration file (default: config.json)")
@@ -34,7 +34,7 @@ public class Main implements Callable<Integer> {
             }
 
             // Load configuration
-            System.out.println("Fantasy Football Playoff Odds Simulator");
+            System.out.println("Fantasy Football Playoff Clinch Scenarios");
             System.out.println("========================================\n");
             System.out.printf("Loading configuration from: %s\n", configPath);
 
@@ -58,41 +58,27 @@ public class Main implements Callable<Integer> {
 
             System.out.println("League data loaded successfully!\n");
 
-            // Check if there are any remaining games
             if (league.getRemainingMatchups().isEmpty()) {
-                System.out.println("No remaining games to simulate. Season is complete!");
-                System.out.println("\nFinal Standings:");
-                // Still run simulation with 0 games to get final standings
+                System.out.println("No regular-season games remain. Showing final standings.\n");
             }
 
-            // Step 2: Run simulation
-            System.out.println("Starting simulation...");
-            SimulationEngine simulator = new SimulationEngine(league);
-            long startTime = System.currentTimeMillis();
-            simulator.runSimulation();
-            long endTime = System.currentTimeMillis();
+            // Step 2: Check every remaining win/loss outcome
+            ScenarioEngine engine = new ScenarioEngine(league);
+            System.out.printf("Checking %,d win/loss outcomes (%d remaining games)...%n",
+                    engine.getTotalOutcomes(), engine.getGames().size());
+            long startTime = System.nanoTime();
+            ClinchAnalyzer analyzer = new ClinchAnalyzer(league, engine);
+            System.out.printf("Done in %.2f seconds%n", (System.nanoTime() - startTime) / 1e9);
 
-            System.out.printf("Simulation completed in %.2f seconds\n",
-                    (endTime - startTime) / 1000.0);
-
-            // Step 3: Analyze results
-            ClinchAnalyzer analyzer = new ClinchAnalyzer(league, simulator);
-
-            // Step 4: Display results
+            // Step 3: Report
             System.out.println(analyzer.generateSummaryReport());
-
-            // Step 5: Show clinch scenarios for teams in contention
             System.out.println(analyzer.generateClinchScenariosReport());
 
-            // Show detailed analysis if verbose mode
             if (config.isVerbose()) {
-                System.out.println("\n" + "=".repeat(70));
-                System.out.println("DETAILED TEAM ANALYSIS");
-                System.out.println("=".repeat(70));
-
-                for (var entry : analyzer.getSortedOdds()) {
-                    System.out.println(analyzer.getDetailedAnalysis(entry.getKey()));
-                }
+                System.out.println("=".repeat(78));
+                System.out.println("REMAINING SCHEDULE");
+                System.out.println("=".repeat(78));
+                System.out.println(analyzer.getRemainingSchedule());
             }
 
             return 0; // Success
@@ -100,7 +86,7 @@ public class Main implements Callable<Integer> {
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
 
-            if (e instanceof java.io.IOException && e.getMessage().contains("not found")) {
+            if (e instanceof java.io.IOException && e.getMessage() != null && e.getMessage().contains("not found")) {
                 System.err.println("\nTo create a sample configuration file, run:");
                 System.err.println("  java -jar FF-1.0-SNAPSHOT.jar --generate-config");
             }

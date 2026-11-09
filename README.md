@@ -1,6 +1,20 @@
-# Fantasy Football Playoff Odds Simulator
+# Fantasy Football Playoff Clinch Scenarios
 
-A Java application that calculates playoff odds for ESPN Fantasy Football leagues by simulating all possible outcomes of remaining games.
+A Java application that finds exact playoff clinch and elimination scenarios for ESPN Fantasy Football leagues by checking every win/loss outcome of the remaining regular-season games.
+
+## What it reports
+
+- **CLINCHED / ELIMINATED**: in (or out) for every remaining outcome, however total points end up.
+- **This week's scenarios** for every team still alive, e.g. "Clinches if: Iron beats Granite OR (Marble beats Cobalt AND Basalt beats Slate)".
+- Whether a team **controls its own destiny** (clinches by winning out), and what happens if it loses out.
+- Results that **must happen** for a team to stay alive.
+- Teams it can end up in a **total-points tiebreaker** with. When a tie comes down to points, the team is shown as points-dependent, because final points totals aren't known yet.
+
+## Tiebreakers
+
+1. Win percentage
+2. Head-to-head record among the tied teams (combined record for 3+ teams; any smaller group still tied starts over at head-to-head)
+3. Total points for
 
 ## Requirements
 
@@ -39,12 +53,9 @@ For private leagues, you'll need your ESPN authentication cookies:
 ## Limitations
 
 - Uses ESPN's unofficial API (may change without notice)
-- For leagues with >20 remaining games, simulation may take significant time (2^20 = 1M+ scenarios)
-- Assumes equal probability for all game outcomes (50/50 win probability)
-- This does not currently use much optimization. Optimizations that can be made include:
-  - Paralell processing of games
-  - Automatic elimination of games that don't affect playoff conditions
-  - Optimizations to object copying and don't clone full teams each sim.
+- Checks all $2^n$ outcomes for $n$ remaining games. On 4 cores: 24 games (12 teams, 4 weeks left) takes about 2 seconds; 30 games (12 teams, 5 weeks left) takes a few minutes. More than 34 remaining games is refused.
+- A remaining game ending in an exact tie is not treated as a possible result.
+- Divisions and extra games (such as a weekly league-median win) are not modelled. A warning is printed if ESPN's standings don't match the schedule.
 
 ## Acknowledgments
 
