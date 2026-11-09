@@ -53,7 +53,7 @@ For private leagues, you'll need your ESPN authentication cookies:
 ## Limitations
 
 - Uses ESPN's unofficial API (may change without notice)
-- Checks all $2^n$ outcomes for $n$ remaining games. On 4 cores: 24 games (12 teams, 4 weeks left) takes about 2 seconds; 30 games (12 teams, 5 weeks left) takes a few minutes. More than 34 remaining games is refused.
+- Checks all $2^n$ outcomes for $n$ remaining games. On 4 cores: 24 games (12 teams, 4 weeks left) takes about 2 seconds; 30 games (12 teams, 5 weeks left) takes about 1.5 minutes. More than 34 remaining games is refused.
 - A remaining game ending in an exact tie is not treated as a possible result.
 - Divisions and extra games (such as a weekly league-median win) are not modelled. A warning is printed if ESPN's standings don't match the schedule.
 
