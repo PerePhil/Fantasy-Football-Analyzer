@@ -37,3 +37,5 @@ build/
 
 ### Application Config ###
 config.json
+### Maven Shade ###
+dependency-reduced-pom.xml

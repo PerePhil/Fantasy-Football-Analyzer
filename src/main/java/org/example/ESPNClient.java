@@ -74,9 +74,12 @@ public class ESPNClient {
         int playoffTeamCount = scheduleSettings.getInt("playoffTeamCount");
         int regularSeasonMatchupPeriods = scheduleSettings.getInt("matchupPeriodCount");
 
-        // Get current week/scoring period
-        int currentMatchupPeriod = data.optInt("scoringPeriodId", 1);
-        int currentWeek = currentMatchupPeriod;
+        // Current matchup period (falls back to the scoring period)
+        int currentWeek = data.optInt("scoringPeriodId", 1);
+        JSONObject status = data.optJSONObject("status");
+        if (status != null) {
+            currentWeek = status.optInt("currentMatchupPeriod", currentWeek);
+        }
 
         // Playoff start week is after regular season
         int playoffStartWeek = regularSeasonMatchupPeriods + 1;
@@ -113,6 +116,9 @@ public class ESPNClient {
             }
 
             Matchup matchup = parseMatchup(matchupJson, matchupPeriodId, currentWeek);
+            if (matchup == null) {
+                continue; // bye week
+            }
             league.addMatchup(matchup);
 
             // Process completed games
@@ -148,7 +154,40 @@ public class ESPNClient {
             }
         }
 
+        warnOnRecordMismatch(league);
         return league;
+    }
+
+    /**
+     * ESPN's standings record is used as-is. If it doesn't match the schedule
+     * (for example a league-median win each week, or a manual adjustment),
+     * the scenarios will be off, so say so.
+     */
+    private void warnOnRecordMismatch(League league) {
+        Map<Integer, int[]> fromSchedule = new HashMap<>(); // teamId -> {wins, losses, ties}
+        for (Matchup m : league.getCompletedMatchups()) {
+            int[] h = fromSchedule.computeIfAbsent(m.getHomeTeamId(), k -> new int[3]);
+            int[] a = fromSchedule.computeIfAbsent(m.getAwayTeamId(), k -> new int[3]);
+            if (m.isTie()) {
+                h[2]++;
+                a[2]++;
+            } else if (m.getWinnerId() == m.getHomeTeamId()) {
+                h[0]++;
+                a[1]++;
+            } else {
+                a[0]++;
+                h[1]++;
+            }
+        }
+        for (Team t : league.getTeams().values()) {
+            int[] r = fromSchedule.getOrDefault(t.getTeamId(), new int[3]);
+            if (r[0] != t.getWins() || r[1] != t.getLosses() || r[2] != t.getTies()) {
+                System.err.printf(
+                        "Warning: %s is %s in ESPN standings but %d-%d-%d from the schedule. "
+                                + "Extra games (e.g. league-median wins) are not modelled.%n",
+                        t.getTeamName(), t.getRecord(), r[0], r[1], r[2]);
+            }
+        }
     }
 
     /**
@@ -187,18 +226,23 @@ public class ESPNClient {
     }
 
     /**
-     * Parse matchup data from JSON.
+     * Parse matchup data from JSON. Returns null for a bye (no away team).
      */
     private Matchup parseMatchup(JSONObject matchupJson, int week, int currentWeek) {
-        // Get home and away teams
-        JSONObject home = matchupJson.getJSONObject("home");
-        JSONObject away = matchupJson.getJSONObject("away");
+        JSONObject home = matchupJson.optJSONObject("home");
+        JSONObject away = matchupJson.optJSONObject("away");
+        if (home == null || away == null) {
+            return null;
+        }
 
         int homeTeamId = home.getInt("teamId");
         int awayTeamId = away.getInt("teamId");
 
-        // Check if game has been completed
-        boolean isCompleted = week < currentWeek;
+        // ESPN marks each matchup HOME / AWAY / TIE once final, UNDECIDED before then.
+        String winner = matchupJson.optString("winner", "");
+        boolean isCompleted = winner.isEmpty()
+                ? week < currentWeek
+                : !winner.equals("UNDECIDED");
 
         if (isCompleted) {
             double homeScore = home.getDouble("totalPoints");
